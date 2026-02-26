@@ -4,12 +4,14 @@
 
 ## 功能特点
 
-- 监听钉钉审批通过事件（使用Stream模式，无需公网服务器）
-- 根据审批表单数据查找AI表格中的匹配记录
-- 自动更新指定字段的数据
-- 支持多个审批流程配置
-- 灵活的数据映射配置
-- 完整的日志记录和错误处理
+- **审批事件监听**: 监听钉钉审批通过事件（使用Stream模式，无需公网服务器）
+- **人事变动监听**: 监听员工入职、转正、调岗、离职、晋升等人事变动事件
+- **自动数据同步**: 根据事件数据自动更新AI表格记录，支持新增和更新
+- **失败事件恢复**: 自动检测并处理推送失败的事件，确保数据不丢失
+- **配置热重载**: 修改配置文件后自动生效，无需重启程序
+- **事件去重**: 自动过滤重复事件，避免重复处理
+- **并行执行**: 多个操作并行执行，提高处理效率
+- **灵活配置**: 支持多个审批流程和人事变动事件配置，支持占位符和表达式
 
 ## 系统要求
 
@@ -215,12 +217,18 @@ dingtalk-approve/
 ├── main.py                    # 程序入口
 ├── pyproject.toml             # 项目配置
 ├── README.md                  # 说明文档
+├── DOCKER.md                  # Docker 部署文档
+├── Dockerfile                 # Docker 镜像构建
+├── docker-compose.yml         # Docker Compose 配置
+├── .env.example               # 环境变量模板
 ├── config/
 │   └── config.yaml            # 配置文件
 ├── src/
-│   ├── __init__.py
+│   ├── __init__.py            # 包初始化
 │   ├── config.py              # 配置管理
-│   ├── stream_client.py       # Stream客户端
+│   ├── config_watcher.py      # 配置文件监听
+│   ├── cache.py               # 缓存管理
+│   ├── stream_client.py       # Stream 客户端和事件处理
 │   └── spreadsheet_client.py  # AI表格操作
 ├── scripts/                   # 自定义脚本目录
 └── logs/                      # 日志目录
@@ -253,13 +261,17 @@ logging:
 
 ### 4. 支持哪些操作类型？
 
-目前支持：
-- `update_spreadsheet`: 更新AI表格记录
-
-未来计划支持：
-- `webhook`: 发送HTTP请求
+目前支持以下操作类型：
+- `update_spreadsheet`: 更新AI表格记录（支持新增和更新）
+  - 当配置 `find_by` 时：查找并更新匹配的记录
+  - 当不配置 `find_by` 时：添加新记录
+- `webhook`: 发送HTTP请求（支持GET和POST）
 - `shell`: 执行Shell命令
 - `python`: 执行Python脚本
+
+支持占位符语法：
+- `{form_data:field_name}`: 使用表单中的字段值
+- 可以组合多个字段：`{form_data:联系人}{form_data:事件}:{form_data:备注}`
 
 ### 5. AI表格和传统表格有什么区别？
 
