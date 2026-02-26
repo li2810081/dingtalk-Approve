@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import time
+from turtle import title
 from typing import Any, Optional, Dict
 from datetime import datetime
 from pathlib import Path
@@ -27,6 +28,21 @@ HRM_CHANGE_TYPE_MAP = {
 
 # 事件去重缓存过期时间（秒）
 EVENT_DEDUP_TTL = 300  # 5分钟
+
+
+class MockEventMessage:
+    """模拟 EventMessage 对象（用于处理失败事件）
+
+    提供与 dingtalk_stream.EventMessage 相同的接口：
+    - headers.event_type: 事件类型
+    - data: 事件数据字典
+
+    这样可以在处理失败事件时复用原有的事件处理方法，避免代码重复。
+    """
+
+    def __init__(self, event_type: str, data: Dict[str, Any]):
+        self.headers = type('Headers', (), {'event_type': event_type})()
+        self.data = data
 
 
 class UnifiedEventHandler(dingtalk_stream.EventHandler):
@@ -88,7 +104,7 @@ class UnifiedEventHandler(dingtalk_stream.EventHandler):
         if expired_keys:
             logger.debug(f"清理了 {len(expired_keys)} 条过期事件缓存")
 
-    async def process(self, event: dingtalk_stream.EventMessage) -> tuple[str, str]:
+    async def process(self, event: dingtalk_stream.EventMessage) -> tuple[int, str]:
         """处理事件"""
         try:
             event_type = event.headers.event_type
@@ -109,7 +125,7 @@ class UnifiedEventHandler(dingtalk_stream.EventHandler):
             logger.exception(f"处理事件时发生错误: {e}")
             return AckMessage.STATUS_SYSTEM_EXCEPTION, str(e)
 
-    async def _process_hrm_event(self, event: dingtalk_stream.EventMessage) -> tuple[str, str]:
+    async def _process_hrm_event(self, event: Any) -> tuple[int, str]:
         """处理人事变动事件"""
         try:
             event_data = event.data
@@ -237,7 +253,7 @@ class UnifiedEventHandler(dingtalk_stream.EventHandler):
             logger.exception(f"处理人事变动事件时发生错误: {e}")
             return AckMessage.STATUS_SYSTEM_EXCEPTION, str(e)
 
-    async def _process_approval_event(self, event: dingtalk_stream.EventMessage) -> tuple[str, str]:
+    async def _process_approval_event(self, event: Any) -> tuple[int, str]:
         """处理审批事件"""
         try:
             event_data = event.data
@@ -246,8 +262,9 @@ class UnifiedEventHandler(dingtalk_stream.EventHandler):
 
             # 检查审批状态
             result = event_data.get("result")
-            if result != "agree":
-                logger.info(f"审批未通过，状态: {result}，跳过处理")
+            type = event_data.get("type")
+            if result != "agree" or type != "finish":
+                # logger.info(f"审批未通过，状态: {result}，跳过处理")
                 return AckMessage.STATUS_OK, "OK"
 
             # 获取审批模板ID
@@ -260,7 +277,7 @@ class UnifiedEventHandler(dingtalk_stream.EventHandler):
             # 查找匹配的审批配置
             approval = self.approvals_map.get(process_code)
             if not approval:
-                logger.info(f"未配置的审批流程: {process_code}")
+                logger.debug(f"未配置的审批模板ID: {process_code}")
                 return AckMessage.STATUS_OK, "OK"
 
             logger.info(f"匹配到审批配置: {approval.name}")
@@ -271,17 +288,22 @@ class UnifiedEventHandler(dingtalk_stream.EventHandler):
                 logger.warning("事件数据中未找到processInstanceId")
                 return AckMessage.STATUS_OK, "OK"
 
-            # 事件去重：使用 processInstanceId 作为唯一标识
-            # 注意：不使用 event_type，因为 bpms_task_change 和 bpms_instance_change 都应该去重
-            event_key = f"approval:{process_instance_id}"
-            if self._is_event_processed(event_key):
-                return AckMessage.STATUS_OK, "OK"
-            self._mark_event_processed(event_key)
-
             # 获取审批实例详情
             try:
                 instance_details = await self.spreadsheet.get_process_instance(process_instance_id)
                 logger.debug(f"审批实例详情: {instance_details}")
+
+                # 再次检查是否完成审核
+                if instance_details.get("result") != "agree" or instance_details.get("status") != "COMPLETED":
+                    logger.info(f"审批实例未完成，状态: {instance_details.get('result')}/{instance_details.get('status')}，跳过处理")
+                    return AckMessage.STATUS_OK, "OK"
+                
+                # 事件去重：使用 processInstanceId 作为唯一标识
+                # 注意：不使用 event_type，因为 bpms_task_change 和 bpms_instance_change 都应该去重
+                event_key = f"approval:{process_instance_id}"
+                if self._is_event_processed(event_key):
+                    return AckMessage.STATUS_OK, "OK"
+                self._mark_event_processed(event_key)
 
                 # 合并事件数据和详情数据
                 event_data.update(instance_details)
@@ -748,217 +770,6 @@ class UnifiedEventHandler(dingtalk_stream.EventHandler):
                 result.append(item)
         return result
 
-    async def _process_hrm_event_v2(self, event_data: dict[str, Any]) -> tuple[int, str]:
-        """处理人事变动事件（直接使用事件数据，不依赖 EventMessage）
-
-        Args:
-            event_data: 事件数据字典
-
-        Returns:
-            (status, message) 状态码和消息
-        """
-        change_type = event_data.get("changeType")
-        staff_id = event_data.get("staffId")
-
-        if change_type is None:
-            logger.warning("人事变动事件中未找到changeType")
-            return AckMessage.STATUS_OK, "OK"
-
-        if not staff_id:
-            logger.warning("人事变动事件中未找到staffId")
-            return AckMessage.STATUS_OK, "OK"
-
-        logger.info(f"收到人事变动事件: {HRM_CHANGE_TYPE_MAP.get(change_type, change_type)} (changeType={change_type})")
-        logger.info(f"员工ID: {staff_id}")
-        logger.debug(f"事件数据: {event_data}")
-
-        # 事件去重：使用 staff_id + change_type 作为唯一标识
-        event_key = f"hrm:{staff_id}:{change_type}"
-        if self._is_event_processed(event_key):
-            return AckMessage.STATUS_OK, "OK"
-        self._mark_event_processed(event_key)
-
-        # 查找匹配的人事变动配置
-        hrm_event = self.hrm_events_map.get(change_type)
-        if not hrm_event:
-            logger.info(f"未配置的人事变动类型: {change_type}")
-            return AckMessage.STATUS_OK, "OK"
-
-        logger.info(f"匹配到人事变动配置: {hrm_event.name}")
-
-        # 构建表单数据（从事件数据中提取）
-        form_data = {
-            "staffId": staff_id,
-            "changeType": change_type,
-            "changeTypeName": HRM_CHANGE_TYPE_MAP.get(change_type, str(change_type)),
-        }
-
-        # 添加事件中的其他字段
-        for key, value in event_data.items():
-            if key not in form_data:
-                form_data[key] = value
-
-        # 获取用户详细信息
-        try:
-            logger.info(f"正在获取用户详细信息: {staff_id}")
-            user_info = await self.spreadsheet.get_user_info(staff_id)
-
-            if user_info:
-                # 将用户信息合并到表单数据中
-                form_data["userInfo"] = user_info
-
-                # 提取常用字段到顶层，方便配置中使用
-                if "userid" in user_info:
-                    form_data["userId"] = user_info["userid"]
-                    form_data["userid"] = user_info["userid"]
-                if "unionid" in user_info:
-                    form_data["unionId"] = user_info["unionid"]
-                    form_data["unionid"] = user_info["unionid"]
-                if "name" in user_info:
-                    form_data["name"] = user_info["name"]
-                    form_data["userName"] = user_info["name"]
-                if "avatar" in user_info:
-                    form_data["avatar"] = user_info["avatar"]
-                if "mobile" in user_info:
-                    form_data["mobile"] = user_info["mobile"]
-                    form_data["phone"] = user_info["mobile"]
-                if "email" in user_info:
-                    form_data["email"] = user_info["email"]
-                if "position" in user_info:
-                    form_data["position"] = user_info["position"]
-                    form_data["jobTitle"] = user_info["position"]
-
-                # 部门信息
-                if "dept_id_list" in user_info:
-                    form_data["deptIdList"] = user_info["dept_id_list"]
-                    form_data["deptIds"] = ", ".join(user_info["dept_id_list"])
-                if "dept_list" in user_info and user_info["dept_list"]:
-                    first_dept = user_info["dept_list"][0]
-                    if "dept_id" in first_dept:
-                        form_data["deptId"] = first_dept["dept_id"]
-                    if "name" in first_dept:
-                        form_data["deptName"] = first_dept["name"]
-
-                # 工作信息
-                if "workPlace" in user_info:
-                    form_data["workPlace"] = user_info["workPlace"]
-                    form_data["location"] = user_info["workPlace"]
-
-                # 状态信息
-                if "active" in user_info:
-                    form_data["active"] = user_info["active"]
-                    form_data["isActive"] = user_info["active"]
-                if "statecode" in user_info:
-                    form_data["stateCode"] = user_info["statecode"]
-
-                # 职务信息
-                if "boss" in user_info:
-                    form_data["isBoss"] = user_info["boss"]
-                if "admin" in user_info:
-                    form_data["isAdmin"] = user_info["admin"]
-                if "senior" in user_info:
-                    form_data["isSenior"] = user_info["senior"]
-
-                logger.info(f"成功获取用户信息: 姓名={form_data.get('name')}, 部门={form_data.get('deptName')}")
-            else:
-                logger.warning(f"未获取到用户信息: {staff_id}")
-
-        except Exception as e:
-            logger.warning(f"获取用户详细信息失败，继续使用事件数据: {e}")
-
-        logger.debug(f"最终表单数据: {form_data}")
-
-        # 执行配置的操作
-        await self._execute_actions(hrm_event.actions, hrm_event.name, form_data, None)
-
-        return AckMessage.STATUS_OK, "OK"
-
-    async def _process_approval_event_v2(self, event_data: dict[str, Any]) -> tuple[int, str]:
-        """处理审批事件（直接使用事件数据，不依赖 EventMessage）
-
-        Args:
-            event_data: 事件数据字典
-
-        Returns:
-            (status, message) 状态码和消息
-        """
-        logger.info(f"事件标题: {event_data.get('title')}")
-        logger.debug(f"事件数据: {event_data}")
-
-        # 检查审批状态
-        result = event_data.get("result")
-        if result != "agree":
-            logger.info(f"审批状态为 {result}，仅处理已通过的审批")
-            return AckMessage.STATUS_OK, "OK"
-
-        # 获取流程实例ID
-        process_instance_id = event_data.get("processInstanceId")
-        if not process_instance_id:
-            logger.warning("未找到 processInstanceId")
-            return AckMessage.STATUS_OK, "OK"
-
-        # 事件去重：使用 processInstanceId 作为唯一标识
-        event_key = f"approval:{process_instance_id}"
-        if self._is_event_processed(event_key):
-            return AckMessage.STATUS_OK, "OK"
-        self._mark_event_processed(event_key)
-
-        # 获取模板ID
-        template_id = event_data.get("processTemplateId") or event_data.get("templateId")
-        if not template_id:
-            logger.warning("未找到流程模板ID")
-            return AckMessage.STATUS_OK, "OK"
-
-        logger.info(f"流程实例ID: {process_instance_id}")
-        logger.info(f"流程模板ID: {template_id}")
-
-        # 查找匹配的审批配置
-        approval = self.approvals_map.get(template_id)
-        if not approval:
-            logger.info(f"未配置的审批流程: {template_id}")
-            return AckMessage.STATUS_OK, "OK"
-
-        logger.info(f"匹配到审批配置: {approval.name}")
-
-        # 获取操作者ID
-        operator_id = event_data.get("operatorId")
-        if operator_id:
-            logger.info(f"操作者ID: {operator_id}")
-        else:
-            operator_id = None
-
-        # 获取流程实例详情
-        try:
-            logger.info(f"正在获取流程实例详情: {process_instance_id}")
-            instance_data = await self.spreadsheet.get_process_instance(process_instance_id)
-
-            if instance_data:
-                # 提取表单数据
-                form_data = instance_data.get("form_data", {})
-                logger.info(f"成功获取表单数据，字段数量: {len(form_data)}")
-                logger.debug(f"表单数据: {form_data}")
-            else:
-                logger.warning(f"未获取到流程实例详情，使用事件数据")
-                form_data = event_data.get("form_data", {})
-                if not form_data:
-                    form_data = {"_from_failed_event": True}
-
-        except Exception as e:
-            logger.warning(f"获取流程实例详情失败，继续使用事件数据: {e}")
-            form_data = event_data.get("form_data", {})
-            if not form_data:
-                form_data = {"_from_failed_event": True}
-
-        # 添加一些额外字段
-        form_data["_processInstanceId"] = process_instance_id
-        form_data["_templateId"] = template_id
-        form_data["_operatorId"] = operator_id or ""
-
-        # 执行配置的操作
-        await self._execute_actions(approval.actions, approval.name, form_data, operator_id)
-
-        return AckMessage.STATUS_OK, "OK"
-
     async def process_failed_events(self, failed_events: list[dict[str, Any]]) -> dict[str, int]:
         """处理推送失败的事件列表
 
@@ -990,13 +801,16 @@ class UnifiedEventHandler(dingtalk_stream.EventHandler):
 
                 logger.info(f"[{i}/{total}] 处理失败事件: {event_type}")
 
-                # 根据事件类型调用相应的处理方法
+                # 创建 MockEventMessage 适配器，复用原有的事件处理方法
+                mock_event = MockEventMessage(event_type, event_data)
+
+                # 根据事件类型调用相应的处理方法（复用原有方法）
                 if event_type == "hrm_mdm_user_change":
                     # 人事变动事件
-                    status, message = await self._process_hrm_event_v2(event_data)
+                    status, message = await self._process_hrm_event(mock_event)
                 elif event_type in ["bpms_task_change", "bpms_instance_change"]:
                     # 审批事件
-                    status, message = await self._process_approval_event_v2(event_data)
+                    status, message = await self._process_approval_event(mock_event)
                 else:
                     logger.warning(f"[{i}/{total}] 未知的事件类型: {event_type}")
                     failed += 1
