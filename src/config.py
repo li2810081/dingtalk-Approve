@@ -2,7 +2,7 @@
 import os
 import re
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict, Any
 import yaml
 from pydantic import BaseModel, Field
 from loguru import logger
@@ -46,12 +46,36 @@ class UpdateField(BaseModel):
 
 
 class Action(BaseModel):
-    """操作配置"""
-    type: str
+    """操作配置（通用基类）
+
+    支持的操作类型：
+    - update_spreadsheet: 更新AI表格记录（find_by存在时更新，不存在时新增）
+    - webhook: 发送HTTP Webhook请求
+    - shell: 执行Shell命令
+    - python: 执行Python脚本
+    """
+    type: str  # 操作类型: update_spreadsheet, webhook, shell, python
+
+    # update_spreadsheet 相关字段
     base_id: Optional[str] = None
     sheet_id: Optional[str] = None
-    find_by: Optional[FindBy] = None
+    find_by: Optional[FindBy] = None  # 为None时执行新增操作，否则执行更新操作
     updates: list[UpdateField] = Field(default_factory=list)
+
+    # webhook 相关字段
+    url: Optional[str] = None
+    method: Optional[str] = "POST"  # HTTP方法: GET, POST, PUT, DELETE
+    headers: Optional[Dict[str, str]] = Field(default_factory=dict)
+    body: Optional[Dict[str, Any]] = Field(default_factory=dict)
+
+    # shell 相关字段
+    command: Optional[str] = None
+    args: list[str] = Field(default_factory=list)
+    cwd: Optional[str] = None  # 工作目录
+    env: Optional[Dict[str, str]] = Field(default_factory=dict)  # 环境变量
+
+    # python 相关字段
+    script: Optional[str] = None  # Python脚本路径
 
 
 class Approval(BaseModel):
@@ -85,6 +109,27 @@ class LoggingConfig(BaseModel):
     retention: str = "30 days"
 
 
+class CacheConfig(BaseModel):
+    """缓存配置"""
+    # Access Token 缓存（默认2小时）
+    access_token_ttl: int = 7200          # Access Token 缓存时间（秒）
+    access_token_max_size: int = 10       # Access Token 最大缓存数
+
+    # 用户信息缓存（默认10分钟）
+    user_info_ttl: int = 600              # 用户信息缓存时间（秒）
+    user_info_max_size: int = 1000        # 用户信息最大缓存数
+
+    # 部门信息缓存（默认30分钟）
+    dept_info_ttl: int = 1800             # 部门信息缓存时间（秒）
+    dept_info_max_size: int = 500         # 部门信息最大缓存数
+
+    # 是否启用缓存
+    enabled: bool = True
+
+    # 自动清理间隔（秒）
+    cleanup_interval: int = 300           # 5分钟清理一次过期缓存
+
+
 class Config(BaseModel):
     """总配置"""
     dingtalk: DingTalkConfig
@@ -93,6 +138,7 @@ class Config(BaseModel):
     hrm_events: list[HrmEvent] = Field(default_factory=list)  # 人事变动事件配置
     execution: Execution = Field(default_factory=Execution)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
+    cache: CacheConfig = Field(default_factory=CacheConfig)  # 缓存配置
 
 
 def _replace_env_vars(content: str) -> str:

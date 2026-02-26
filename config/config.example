@@ -31,23 +31,60 @@ approvals:
             form_field: "事件" # 使用审批表单中的值
           - field_name: "备注"      # AI表格中的字段名
             form_field: "备注"      
-      
-      # 2. 发送通知
-      - type: "webhook"
-        url: "https://oapi.dingtalk.com/robot/send?access_token=f196a5ef1d86470121f23416db7da7583f548045dd65f0dd9aeb8c0743f06c27"
-        method: "POST"
-        body:
-          text: "{\"content\":\"我就是{form_data:联系人}, {form_data:部门} 是不一样的烟火{form_data:事件}\",\"at\":{\"atUserIds\":[\"014728255240768602\"]}}"
-          msgtype: "text"
 
+  # 示例：报销审批
+  - name: "报销审批"
+    template_id: "proc_reimbursement"
+    enabled: true
+    actions:
       - type: "update_spreadsheet"
-        base_id: "Y1OQX0akWmqg90XvIQw00mbvWGlDd3mE"        # AI表格(Notable/多维表格)的Base ID
-        sheet_id: "eqIMqv1"             # 数据表ID或名称
+        sheet_id: "sheet2"             # 数据表ID或名称
+        find_by:
+          field_name: "申请人ID"        # AI表格中的字段名
+          form_field: "applicant_id"   # 从审批表单中提取的字段名
         updates:
-          - field_name: "记录"      # AI表格中的字段名
-            form_field: "{form_data:联系人}{form_data:事件}:{form_data:备注}"   # 使用审批表单中的值      
-      
+          - field_name: "报销金额"      # AI表格中的字段名
+            form_field: "amount"       # 使用审批表单中的值
+          - field_name: "报销类别"      # AI表格中的字段名
+            form_field: "category"     # 使用审批表单中的值
+          - field_name: "状态"          # AI表格中的字段名
+            value: "已通过"             # 使用固定值
 
+  # 示例：使用Webhook转发
+  - name: "采购审批"
+    template_id: "proc_purchase"
+    enabled: false
+    actions:
+      - type: "webhook"
+        url: "https://your-server.com/api/webhook"
+        method: "POST"
+        headers:
+          Authorization: "Bearer your_token"
+
+  # 示例：执行Shell命令
+  - name: "系统访问审批"
+    template_id: "proc_system_access"
+    enabled: false
+    actions:
+      - type: "shell"
+        command: "/scripts/grant_access.sh"
+        args:
+          - "{form_data:user_id}"
+          - "{form_data:resource_id}"
+
+  # 示例：执行Python脚本
+  - name: "数据导出审批"
+    template_id: "proc_data_export"
+    enabled: false
+    actions:
+      - type: "python"
+        script: "/scripts/export_data.py"
+        args:
+          - "{form_data:export_type}"
+          - "{form_data:date_range}"
+
+# 监听的人事变动事件配置
+# 注意：系统会自动获取用户的详细信息（姓名、部门、职位等）并合并到表单数据中
 hrm_events:
   # 示例：离职事件（自动获取用户详细信息）
   - name: "离职事件"

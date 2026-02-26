@@ -1,0 +1,46 @@
+version: '3.8'
+
+services:
+  dingtalk-approve:
+    image: dingtalk-approve:latest
+    container_name: dingtalk-approve
+    restart: unless-stopped
+
+    # 环境变量（从 .env 文件读取）
+    env_file:
+      - .env
+
+    # 挂载配置和日志目录
+    volumes:
+      # 挂载配置文件（支持热重载）
+      - ./config:/app/config
+      # 挂载日志目录
+      - ./logs:/app/logs
+
+    # 网络模式（如果需要访问外部API）
+    # network_mode: "bridge"
+
+    # 健康检查（可选）
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+    # 日志配置
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    # 资源限制（可选）
+    # deploy:
+    #   resources:
+    #     limits:
+    #       cpus: '1.0'
+    #       memory: 512M
+    #     reservations:
+    #       cpus: '0.5'
+    #       memory: 256M

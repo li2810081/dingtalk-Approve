@@ -8,6 +8,7 @@ from src.config import load_config, setup_logging
 from src.spreadsheet_client import SpreadsheetClient
 from src.stream_client import create_stream_client
 from src.config_watcher import ConfigWatcher
+from src.cache import init_cache, get_all_cache_stats
 
 
 class Application:
@@ -19,6 +20,10 @@ class Application:
 
         # 设置日志
         setup_logging(self.config.logging)
+
+        # 初始化缓存系统
+        init_cache(self.config)
+        logger.info("缓存系统已初始化")
 
         # 创建AI表格客户端
         self.spreadsheet_client = SpreadsheetClient(
