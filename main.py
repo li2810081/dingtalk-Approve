@@ -1,14 +1,97 @@
 """钉钉审批事件监听系统 - 主程序入口"""
+import argparse
 import asyncio
+import os
 import signal
 import sys
+import json
 from loguru import logger
 
+from dotenv import load_dotenv
 from src.config import load_config, setup_logging
 from src.spreadsheet_client import SpreadsheetClient
-from src.stream_client import create_stream_client
+from src.stream_client import create_stream_client, UnifiedEventHandler
 from src.config_watcher import ConfigWatcher
 from src.cache import init_cache, get_all_cache_stats
+
+
+async def show_failed_events():
+    """显示推送失败的事件列表"""
+    load_dotenv()
+
+    # 加载配置
+    try:
+        config = load_config()
+    except Exception as e:
+        logger.error(f"加载配置失败: {e}")
+        return
+
+    # 初始化客户端
+    app_key = os.getenv("DINGTALK_APP_KEY")
+    app_secret = os.getenv("DINGTALK_APP_SECRET")
+
+    if not app_key or not app_secret:
+        logger.error("错误: 未在 .env 文件中找到 DINGTALK_APP_KEY 或 DINGTALK_APP_SECRET")
+        return
+
+    client = SpreadsheetClient(
+        config=config.spreadsheet,
+        app_key=app_key,
+        app_secret=app_secret
+    )
+
+    logger.info("=" * 60)
+    logger.info("获取推送失败的事件列表")
+    logger.info("=" * 60)
+    logger.info("")
+
+    try:
+        result = await client.get_failed_events()
+
+        logger.info("获取结果:")
+        logger.info(f"  企业ID: {result.get('corpid', 'N/A')}")
+        logger.info(f"  失败事件数量: {len(result.get('failed_list', []))}")
+        logger.info(f"  是否还有更多: {result.get('has_more', False)}")
+
+        if "error" in result:
+            logger.error(f"  错误: {result['error']}")
+            return
+
+        failed_list = result.get("failed_list", [])
+
+        if not failed_list:
+            logger.info("")
+            logger.info("✓ 没有推送失败的事件")
+            logger.info("")
+            logger.info("说明:")
+            logger.info("  - 可能所有事件都成功推送了")
+            logger.info("  - 或者钉钉尚未重试推送失败的事件")
+            logger.info("  - 钉钉会在推送失败后的 10秒、30秒 进行重试")
+            logger.info("  - 重试失败后的 3-5 分钟内可通过此接口获取")
+        else:
+            logger.info("")
+            logger.info("失败事件详情:")
+            for i, failed_event in enumerate(failed_list, 1):
+                event_type = list(failed_event.keys())[0] if failed_event else "unknown"
+                event_data = list(failed_event.values())[0] if failed_event else {}
+
+                logger.info("")
+                logger.info(f"  [{i}] 事件类型: {event_type}")
+                logger.info(f"      数据: {json.dumps(event_data, ensure_ascii=False, indent=10)[:300]}...")
+
+        logger.info("")
+        logger.info("=" * 60)
+
+        # 如果有失败事件，提供提示
+        if failed_list:
+            logger.info("")
+            logger.info("💡 提示: 可以手动处理这些失败的事件")
+            logger.info("   例如: 将事件数据重新提交给事件处理器处理")
+
+    except Exception as e:
+        logger.exception(f"获取失败事件列表时发生错误: {e}")
+    finally:
+        await client.close()
 
 
 class Application:
@@ -35,6 +118,9 @@ class Application:
         # Stream客户端
         self.stream_client = None
 
+        # 事件处理器（用于处理失败事件）
+        self.event_handler = None
+
         # 配置监听器
         self.config_watcher = None
 
@@ -45,6 +131,39 @@ class Application:
     def _load_config(self):
         """加载配置"""
         return load_config(self.config_path)
+
+    async def _process_failed_events(self):
+        """处理推送失败的事件"""
+        try:
+            logger.info("=" * 50)
+            logger.info("检查推送失败的事件...")
+            logger.info("=" * 50)
+
+            result = await self.spreadsheet_client.get_failed_events()
+
+            if "error" in result:
+                logger.warning(f"获取失败事件列表时出错: {result['error']}")
+                return
+
+            failed_list = result.get("failed_list", [])
+
+            if not failed_list:
+                logger.info("✓ 没有推送失败的事件")
+                return
+
+            logger.info(f"发现 {len(failed_list)} 个推送失败的事件，开始处理...")
+
+            # 使用事件处理器处理失败事件
+            if self.event_handler:
+                stats = await self.event_handler.process_failed_events(failed_list)
+                logger.info("=" * 50)
+                logger.info(f"失败事件处理完成: 总计 {stats['total']}, 成功 {stats['success']}, 失败 {stats['failed']}")
+                logger.info("=" * 50)
+            else:
+                logger.warning("事件处理器未初始化，无法处理失败事件")
+
+        except Exception as e:
+            logger.exception(f"处理失败事件时发生错误: {e}")
 
     async def _reload_config(self):
         """重载配置"""
@@ -74,6 +193,9 @@ class Application:
             self.config = new_config
             logger.info("配置重载完成")
 
+            # 处理失败事件
+            await self._process_failed_events()
+
         except Exception as e:
             logger.error(f"重载配置失败: {e}")
             raise
@@ -93,8 +215,10 @@ class Application:
             except Exception as e:
                 logger.warning(f"停止 Stream 客户端时出错: {e}")
 
-        # 创建新的 Stream 客户端
+        # 创建新的 Stream 客户端和事件处理器
         self.stream_client = create_stream_client(new_config, self.spreadsheet_client)
+        # 更新事件处理器引用
+        self.event_handler = UnifiedEventHandler(new_config, self.spreadsheet_client)
         logger.info("Stream 客户端已重新创建")
 
     async def start(self):
@@ -121,8 +245,9 @@ class Application:
             }.get(hrm_event.change_type, f"类型{hrm_event.change_type}")
             logger.info(f"  [{status}] {hrm_event.name} ({change_type_name}): {len(hrm_event.actions)} 个操作")
 
-        # 创建Stream客户端
+        # 创建Stream客户端和事件处理器
         self.stream_client = create_stream_client(self.config, self.spreadsheet_client)
+        self.event_handler = UnifiedEventHandler(self.config, self.spreadsheet_client)
 
         # 启动配置监听器
         self.config_watcher = ConfigWatcher(self.config_path, self._reload_config)
@@ -130,6 +255,9 @@ class Application:
 
         self._running = True
         self._stream_started = True
+
+        # 处理失败事件（启动时）
+        await self._process_failed_events()
 
         try:
             # 启动监听（阻塞运行）
@@ -175,6 +303,29 @@ def signal_handler(signum, frame):
 
 def main():
     """主函数"""
+    # 解析命令行参数
+    parser = argparse.ArgumentParser(
+        description="钉钉审批事件监听系统",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+示例:
+  python main.py                 # 启动事件监听
+  python main.py --failed-events # 获取推送失败的事件列表
+        """
+    )
+    parser.add_argument(
+        "--failed-events",
+        action="store_true",
+        help="获取推送失败的事件列表"
+    )
+
+    args = parser.parse_args()
+
+    # 如果请求失败事件列表，执行后退出
+    if args.failed_events:
+        asyncio.run(show_failed_events())
+        return
+
     # 注册信号处理
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)

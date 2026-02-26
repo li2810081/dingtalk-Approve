@@ -710,6 +710,67 @@ class SpreadsheetClient:
             logger.info(f"记录更新成功: recordId={record_id}, 更新字段={list(update_fields.keys())}")
         return success
 
+    async def get_failed_events(self) -> dict[str, Any]:
+        """获取推送失败的事件列表
+
+        API: https://open.dingtalk.com/document/call_back/get_call_back_failed_result
+
+        用于获取钉钉推送失败到回调地址的事件。当网络故障或服务不可用时，
+        钉钉会重试推送，但也可以通过此接口主动拉取失败的事件。
+
+        Returns:
+            失败事件列表，包含：
+            - failed_list: 失败事件列表
+            - has_more: 是否还有更多失败事件
+            - corpid: 企业ID
+        """
+        access_token = await self._get_access_token()
+        client = await self._get_client()
+
+        url = "https://oapi.dingtalk.com/call_back/get_call_back_failed_result"
+        params = {"access_token": access_token}
+
+        logger.debug("获取推送失败的事件列表...")
+
+        try:
+            response = await client.get(url, params=params)
+            result = response.json()
+
+            if result.get("errcode") != 0:
+                logger.error(f"获取失败事件列表失败: {result}")
+                return {
+                    "failed_list": [],
+                    "has_more": False,
+                    "error": result.get("errmsg", "Unknown error")
+                }
+
+            failed_list = result.get("failed_list", [])
+            has_more = result.get("has_more", False)
+            corpid = result.get("corpid", "")
+
+            logger.info(f"获取到 {len(failed_list)} 个推送失败的事件, has_more={has_more}")
+
+            # 详细日志
+            for i, failed_event in enumerate(failed_list):
+                event_type = list(failed_event.keys())[0] if failed_event else "unknown"
+                logger.debug(f"  [{i + 1}] 事件类型: {event_type}")
+
+            return {
+                "failed_list": failed_list,
+                "has_more": has_more,
+                "corpid": corpid,
+                "errcode": result.get("errcode"),
+                "errmsg": result.get("errmsg"),
+            }
+
+        except Exception as e:
+            logger.error(f"获取失败事件列表异常: {e}")
+            return {
+                "failed_list": [],
+                "has_more": False,
+                "error": str(e)
+            }
+
     async def close(self):
         """关闭客户端"""
         if self._client:
