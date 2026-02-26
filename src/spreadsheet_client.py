@@ -2,6 +2,7 @@
 
 使用记录式API，而非传统的单元格(A1/B1)操作方式
 """
+import json
 import re
 from datetime import datetime
 from typing import Any, Optional
@@ -532,6 +533,9 @@ class SpreadsheetClient:
             "records": records,
         }
 
+        # 调试：显示将要发送的数据
+        logger.debug(f"添加记录请求体: {json.dumps(body, ensure_ascii=False)}")
+
         # 构建查询参数：优先使用传入的operator_id，否则使用配置中的默认值
         final_operator_id = operator_id or self.config.default_operator_id
         params = {
@@ -544,10 +548,18 @@ class SpreadsheetClient:
         response = await client.post(url, headers=headers, json=body, params=params)
         result = response.json()
 
+        # 详细的错误日志
+        logger.debug(f"添加记录 API 响应: {result}")
+
         # 检查错误：只有明确存在 errcode 且不为 0 时才认为是错误
         if "errcode" in result and result.get("errcode") != 0:
             logger.error(f"添加记录失败: {result}")
             raise Exception(f"添加记录失败: {result}")
+
+        # 检查 HTTP 状态码
+        if response.status_code >= 400:
+            logger.error(f"添加记录 HTTP 错误: {response.status_code}, 响应: {result}")
+            raise Exception(f"添加记录 HTTP 错误 {response.status_code}: {result}")
 
         # 成功响应格式: {"value": [{"id": "xxx"}, ...]}
         added_ids = [item.get("id") for item in result.get("value", [])]

@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python tests/test_list_sheets.py)",
+      "Bash(python tests/test_add_record.py)",
+      "Bash(python -c \":*)",
+      "Bash(python tests/test_add_simple.py)"
+    ]
+  }
+}

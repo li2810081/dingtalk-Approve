@@ -3,6 +3,7 @@ import asyncio
 import os
 import sys
 import logging
+from datetime import datetime
 
 # 添加项目根目录到 sys.path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -27,24 +28,19 @@ async def test_add_without_findby(client: SpreadsheetClient, base_id: str, sheet
 
     # 模拟form_data
     form_data = {
-        "name": "测试员工",
-        "department": "技术部",
-        "position": "工程师",
-        "mobile": "13800138000"
+        "name": f"测试员工_{datetime.now().strftime('%H%M%S')}",
     }
 
     # 创建action配置（没有find_by）
+    # 注意：字段名必须与表格中实际存在的字段匹配
+    # 表格中只有一个字段: "员工"
     action = Action(
         type="update_spreadsheet",
         sheet_id=sheet_id,
         base_id=base_id,
-        find_by=None,  # 关键：没有find_by
+        find_by=None,  # 关键：没有find_by，执行新增操作
         updates=[
-            UpdateField(field_name="姓名", form_field="name"),
-            UpdateField(field_name="部门", form_field="department"),
-            UpdateField(field_name="职位", form_field="position"),
-            UpdateField(field_name="手机", form_field="mobile"),
-            UpdateField(field_name="入职时间", timestamp=True),
+            UpdateField(field_name="员工", value="{form_data:name}"),  # 使用实际存在的字段名
         ]
     )
 
